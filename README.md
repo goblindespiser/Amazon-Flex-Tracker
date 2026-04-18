@@ -28,3 +28,12 @@ This is a public pre-release build. It is not tax filing software. Double check 
 3. Extract zip
 4. Open extracted folder
 5. Double click FlexTrack.exe to run
+
+## How to run tests
+From the project folder, run:
+
+```bat
+python -m unittest discover -s tests -v
+```
+
+This runs the current unit tests for helper functions and tax calculations.
