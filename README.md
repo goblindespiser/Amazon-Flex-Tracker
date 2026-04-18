@@ -1,6 +1,6 @@
 # flex-tracker
 
-A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python, Tkinter, and SQLite. The current downloadable build is the portable ZIP.
+A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python, Tkinter, and SQLite. The current downloadable build is the v0.1.0 portable ZIP.
 
 ## Current features
 - Daily log entry
@@ -11,7 +11,7 @@ A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python,
 - Local backups
 
 ## Notes
-This is a public pre-release build. It is not tax filing software. Double check estimates. 
+This is a public pre-release build. It is not tax filing software. Double check estimates. For State estimates, the only supported state at this time is Ohio. 
 
 ## Download & Installation
 1. In the right hand menu under the "About" section, click "Releases"
