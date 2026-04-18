@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import os
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -11,9 +13,24 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "Amazon Flex Tracker"
-APP_DIR = Path.home() / ".flex_tracker_stage1"
+APP_FOLDER_NAME = "FlexTrack"
+LEGACY_APP_DIR = Path.home() / ".flex_tracker_stage1"
+
+
+def get_user_app_dir() -> Path:
+    if sys.platform.startswith("win"):
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            return Path(local_appdata) / APP_FOLDER_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_FOLDER_NAME
+    return Path.home() / ".local" / "share" / APP_FOLDER_NAME
+
+
+APP_DIR = get_user_app_dir()
 DB_PATH = APP_DIR / "flex_tracker.db"
 BACKUP_DIR = APP_DIR / "backups"
+EXPORT_DIR = APP_DIR / "exports"
 DATE_FMT = "%Y-%m-%d"
 EXPENSE_CATEGORIES = (
     "Accessories",
@@ -128,6 +145,43 @@ OHIO_ESTIMATED_PAYMENT_THRESHOLD_CENTS = 50_000
 def ensure_app_dirs() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_data() -> str | None:
+    if APP_DIR == LEGACY_APP_DIR or not LEGACY_APP_DIR.exists():
+        return None
+
+    ensure_app_dirs()
+    migrated_parts: list[str] = []
+
+    legacy_db = LEGACY_APP_DIR / "flex_tracker.db"
+    if legacy_db.exists() and not DB_PATH.exists():
+        shutil.copy2(legacy_db, DB_PATH)
+        migrated_parts.append("database")
+
+    for label, source_dir, target_dir in (
+        ("backups", LEGACY_APP_DIR / "backups", BACKUP_DIR),
+        ("exports", LEGACY_APP_DIR / "exports", EXPORT_DIR),
+    ):
+        if not source_dir.exists():
+            continue
+        copied_any = False
+        for item in source_dir.iterdir():
+            destination = target_dir / item.name
+            if destination.exists():
+                continue
+            if item.is_file():
+                shutil.copy2(item, destination)
+                copied_any = True
+        if copied_any:
+            migrated_parts.append(label)
+
+    if not migrated_parts:
+        return None
+
+    migrated_text = ", ".join(migrated_parts)
+    return f"Migrated legacy {migrated_text} into {APP_DIR}."
 
 
 def now_iso() -> str:
@@ -697,6 +751,7 @@ class FlexTrackerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         ensure_app_dirs()
+        self.migration_note = migrate_legacy_data()
         self.db = Database(DB_PATH)
         self.title(APP_NAME)
         self.geometry("1400x860")
@@ -708,7 +763,10 @@ class FlexTrackerApp(tk.Tk):
         except tk.TclError:
             pass
 
-        self.status_var = tk.StringVar(value=f"Database: {DB_PATH}")
+        initial_status = f"Database: {DB_PATH}"
+        if self.migration_note:
+            initial_status = f"{self.migration_note} | {initial_status}"
+        self.status_var = tk.StringVar(value=initial_status)
 
         self.daily_log_edit_id: int | None = None
         self.other_expense_edit_id: int | None = None
@@ -1581,6 +1639,7 @@ class FlexTrackerApp(tk.Tk):
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
             initialfile="daily_logs.csv",
+            initialdir=str(EXPORT_DIR),
         )
         if not path:
             return
@@ -1630,6 +1689,7 @@ class FlexTrackerApp(tk.Tk):
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
             initialfile="other_expenses.csv",
+            initialdir=str(EXPORT_DIR),
         )
         if not path:
             return
@@ -1665,6 +1725,7 @@ class FlexTrackerApp(tk.Tk):
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
             initialfile=f"summary_{month_filter}.csv",
+            initialdir=str(EXPORT_DIR),
         )
         if not path:
             return
@@ -1721,6 +1782,7 @@ class FlexTrackerApp(tk.Tk):
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
             initialfile=f"tax_estimate_{month_filter}.csv",
+            initialdir=str(EXPORT_DIR),
         )
         if not path:
             return
