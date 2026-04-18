@@ -18,6 +18,7 @@ A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python,
 - Windows backup folder: `%LOCALAPPDATA%\\FlexTrack\\backups`
 - Windows export folder: `%LOCALAPPDATA%\\FlexTrack\\exports`
 - The app uses only Python standard-library modules in this repository, so runtime overhead stays low.
+- Uses the computer’s local system time to determine timezone (a user in California will get California local date/time if their computer is set correctly)
 
 ## Notes
 This is a public pre-release build. It is not tax filing software. Double check estimates. For State estimates, the only supported state at this time is Ohio. 
