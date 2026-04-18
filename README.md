@@ -11,7 +11,4 @@ A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python,
 - Local backups
 
 ## Notes
-This is a private working prototype. It is not tax filing software.
-
-## Run
-python app.py
+This is a private working prototype. It is not tax filing software. Double check estimates.
