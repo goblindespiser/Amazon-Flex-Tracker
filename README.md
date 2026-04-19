@@ -7,6 +7,9 @@ A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python,
 - Other expense tracking
 - Summary view
 - Tax estimate view
+- Federal estimate with self-employment tax and simplified QBI deduction
+- Multi-state tax estimate support
+- California Prop 22 informational estimate panel
 - CSV export
 - Local backups
 
@@ -18,13 +21,31 @@ A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python,
 - Windows backup folder: `%LOCALAPPDATA%\\FlexTrack\\backups`
 - Windows export folder: `%LOCALAPPDATA%\\FlexTrack\\exports`
 - The app uses only Python standard-library modules in this repository, so runtime overhead stays low.
-- Uses the computer’s local system time to determine timezone (a user in California will get California local date/time if their computer is set correctly)
 
-## Notes
-This is a public pre-release build. It is not tax filing software. Double check estimates. For State estimates, the only supported state at this time is Ohio. 
+## Tax estimate scope
+This app is a simplified estimator, not tax filing software.
+
+Current tax assumptions:
+- Amazon Flex is the user's only income
+- no withholding
+- no credits
+- no itemized deductions
+- no unusual adjustments
+- no school district tax
+- the user qualifies for the filing status they select
+- dependent-related credits are not calculated
+
+Federal notes:
+- The federal estimate includes self-employment tax and a simplified QBI estimate under the app's assumptions.
+- Additional Medicare Tax is not currently modeled.
+
+State notes:
+- Supported states: Ohio, California, Texas, Florida, Illinois, Virginia, Pennsylvania, North Carolina, and New York
+- California includes a separate Prop 22 informational estimate panel
+- State calculations are simplified resident estimates and do not attempt to cover every edge case
 
 ## Download & Installation
-1. Direct link to the latest release: https://github.com/goblindespiser/flex-tracker/releases/tag/v0.1.1
+1. Direct link to the latest release: https://github.com/goblindespiser/flex-track/releases/tag/v0.1.1
 2. Click "FlexTrack.zip" to begin download to desired destination folder
 3. Extract zip
 4. Open extracted folder
