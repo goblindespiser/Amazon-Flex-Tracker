@@ -91,19 +91,10 @@ FEDERAL_BRACKETS_CENTS = {
     ],
 }
 
-OHIO_BUSINESS_INCOME_DEDUCTION_LIMIT_CENTS = {
-    "single": 25_000_000,
-    "married_filing_jointly": 25_000_000,
-    "married_filing_separately": 12_500_000,
-    "head_of_household": 25_000_000,
-    "qualifying_surviving_spouse": 25_000_000,
-}
-
 STANDARD_MILEAGE_RATE_PER_MILE = Decimal("0.725")
+QBI_DEDUCTION_RATE = Decimal("0.20")
 SE_NET_EARNINGS_FACTOR = Decimal("0.9235")
 SE_SOCIAL_SECURITY_RATE = Decimal("0.124")
 SE_MEDICARE_RATE = Decimal("0.029")
 SE_THRESHOLD_CENTS = 40_000
 SOCIAL_SECURITY_WAGE_BASE_CENTS = 18_450_000
-OHIO_BUSINESS_TAX_RATE = Decimal("0.03")
-OHIO_ESTIMATED_PAYMENT_THRESHOLD_CENTS = 50_000

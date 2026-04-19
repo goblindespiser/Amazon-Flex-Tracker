@@ -19,19 +19,18 @@ from constants import (
     FEDERAL_BRACKETS_CENTS,
     FEDERAL_STANDARD_DEDUCTION_CENTS,
     FILING_STATUS_LABELS,
-    OHIO_BUSINESS_INCOME_DEDUCTION_LIMIT_CENTS,
-    OHIO_BUSINESS_TAX_RATE,
-    OHIO_ESTIMATED_PAYMENT_THRESHOLD_CENTS,
     SE_MEDICARE_RATE,
     SE_NET_EARNINGS_FACTOR,
     SE_SOCIAL_SECURITY_RATE,
     SE_THRESHOLD_CENTS,
+    QBI_DEDUCTION_RATE,
     SOCIAL_SECURITY_WAGE_BASE_CENTS,
     STANDARD_MILEAGE_RATE_PER_MILE,
     TAX_DISCLAIMER,
     TAX_SCOPE_NOTE,
     TAX_YEAR,
 )
+from states import calculate_state_tax, get_available_states, get_state_config
 LEGACY_APP_DIR = Path.home() / ".flex_tracker_stage1"
 
 
@@ -195,8 +194,28 @@ def calculate_progressive_tax_cents(taxable_income_cents: int, filing_status: st
     return money_to_cents(total)
 
 
-def calculate_tax_estimate(tax_basis: dict, filing_status: str) -> dict:
+def calculate_qbi_deduction_cents(
+    net_business_profit_cents: int,
+    deductible_half_se_tax_cents: int,
+    taxable_income_before_qbi_cents: int,
+) -> int:
+    if net_business_profit_cents <= 0 or taxable_income_before_qbi_cents <= 0:
+        return 0
+
+    qbi_base_cents = max(net_business_profit_cents - deductible_half_se_tax_cents, 0)
+    qbi_component_cents = money_to_cents((Decimal(qbi_base_cents) / Decimal("100")) * QBI_DEDUCTION_RATE)
+    taxable_income_cap_cents = money_to_cents((Decimal(taxable_income_before_qbi_cents) / Decimal("100")) * QBI_DEDUCTION_RATE)
+    return min(qbi_component_cents, taxable_income_cap_cents)
+
+
+def calculate_tax_estimate(
+    tax_basis: dict,
+    filing_status: str,
+    state_code: str,
+    tax_locality: str = "",
+) -> dict:
     gross_business_income_cents = tax_basis["gross_business_income_cents"]
+    route_hours_tenths = tax_basis["route_hours_tenths"]
     business_miles_tenths = tax_basis["business_miles_tenths"]
     deductible_tolls_parking_cents = tax_basis["tolls_parking_cents"]
 
@@ -216,26 +235,50 @@ def calculate_tax_estimate(tax_basis: dict, filing_status: str) -> dict:
         se_tax_status = "Self-employment tax applies"
     else:
         estimated_self_employment_tax_cents = 0
-        se_tax_status = "Below self-employment tax threshold"
+        threshold_gap_dollars = Decimal(SE_THRESHOLD_CENTS - net_earnings_for_se_tax_cents) / Decimal("100")
+        se_tax_status = (
+            "Below federal self-employment tax threshold by "
+            f"${threshold_gap_dollars:.2f}"
+        )
 
     deductible_half_se_tax_cents = estimated_self_employment_tax_cents // 2
     estimated_federal_agi_cents = net_business_profit_cents - deductible_half_se_tax_cents
     standard_deduction_cents = FEDERAL_STANDARD_DEDUCTION_CENTS[filing_status]
-    estimated_federal_taxable_income_cents = max(estimated_federal_agi_cents - standard_deduction_cents, 0)
-    estimated_federal_income_tax_cents = calculate_progressive_tax_cents(estimated_federal_taxable_income_cents, filing_status)
+    estimated_federal_taxable_income_before_qbi_cents = max(estimated_federal_agi_cents - standard_deduction_cents, 0)
+    estimated_qbi_deduction_cents = calculate_qbi_deduction_cents(
+        net_business_profit_cents,
+        deductible_half_se_tax_cents,
+        estimated_federal_taxable_income_before_qbi_cents,
+    )
+    estimated_federal_taxable_income_cents = max(
+        estimated_federal_taxable_income_before_qbi_cents - estimated_qbi_deduction_cents,
+        0,
+    )
+    estimated_federal_income_tax_cents = calculate_progressive_tax_cents(
+        estimated_federal_taxable_income_cents,
+        filing_status,
+    )
     estimated_total_federal_tax_cents = estimated_self_employment_tax_cents + estimated_federal_income_tax_cents
 
-    ohio_starting_income_cents = max(estimated_federal_agi_cents, 0)
-    ohio_business_income_deduction_cents = min(ohio_starting_income_cents, OHIO_BUSINESS_INCOME_DEDUCTION_LIMIT_CENTS[filing_status])
-    ohio_taxable_business_income_cents = max(ohio_starting_income_cents - ohio_business_income_deduction_cents, 0)
-    estimated_ohio_state_tax_cents = money_to_cents((Decimal(ohio_taxable_business_income_cents) / Decimal("100")) * OHIO_BUSINESS_TAX_RATE)
-    ohio_status = (
-        "Below Ohio estimated payment threshold"
-        if estimated_ohio_state_tax_cents <= OHIO_ESTIMATED_PAYMENT_THRESHOLD_CENTS
-        else "Ohio estimated payment threshold exceeded"
-    )
+    state_inputs = {
+        "estimated_federal_agi_cents": estimated_federal_agi_cents,
+        "deductible_half_se_tax_cents": deductible_half_se_tax_cents,
+        "estimated_self_employment_tax_cents": estimated_self_employment_tax_cents,
+        "gross_business_income_cents": gross_business_income_cents,
+        "route_hours_tenths": route_hours_tenths,
+        "net_business_profit_cents": net_business_profit_cents,
+        "business_miles_tenths": business_miles_tenths,
+        "deductible_tolls_parking_cents": deductible_tolls_parking_cents,
+        "tax_locality": tax_locality,
+    }
 
-    combined_estimated_tax_cents = estimated_total_federal_tax_cents + estimated_ohio_state_tax_cents
+    state_results = calculate_state_tax(state_code, state_inputs, filing_status)
+    estimated_local_tax_cents = state_results.get("estimated_local_tax_cents", 0)
+    combined_estimated_tax_cents = (
+        estimated_total_federal_tax_cents
+        + state_results["estimated_state_tax_cents"]
+        + estimated_local_tax_cents
+    )
 
     return {
         "gross_business_income_cents": gross_business_income_cents,
@@ -248,15 +291,13 @@ def calculate_tax_estimate(tax_basis: dict, filing_status: str) -> dict:
         "deductible_half_se_tax_cents": deductible_half_se_tax_cents,
         "estimated_federal_agi_cents": estimated_federal_agi_cents,
         "standard_deduction_cents": standard_deduction_cents,
+        "estimated_federal_taxable_income_before_qbi_cents": estimated_federal_taxable_income_before_qbi_cents,
+        "estimated_qbi_deduction_cents": estimated_qbi_deduction_cents,
         "estimated_federal_taxable_income_cents": estimated_federal_taxable_income_cents,
         "estimated_federal_income_tax_cents": estimated_federal_income_tax_cents,
         "estimated_total_federal_tax_cents": estimated_total_federal_tax_cents,
-        "ohio_starting_income_cents": ohio_starting_income_cents,
-        "ohio_business_income_deduction_cents": ohio_business_income_deduction_cents,
-        "ohio_taxable_business_income_cents": ohio_taxable_business_income_cents,
-        "estimated_ohio_state_tax_cents": estimated_ohio_state_tax_cents,
-        "ohio_status": ohio_status,
-        "school_district_tax_status": "Excluded by assumption",
+        **state_results,
+        "estimated_local_tax_cents": estimated_local_tax_cents,
         "combined_estimated_tax_cents": combined_estimated_tax_cents,
     }
 
@@ -326,6 +367,14 @@ class Database:
             conn.execute(
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)",
                 ("filing_status", DEFAULT_FILING_STATUS),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)",
+                ("tax_state", ""),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)",
+                ("tax_locality", ""),
             )
             conn.commit()
 
@@ -503,6 +552,7 @@ class Database:
                 """
                 SELECT
                     COALESCE(SUM(total_block_pay_cents), 0) AS gross_business_income_cents,
+                    COALESCE(SUM(route_hours_tenths), 0) AS route_hours_tenths,
                     COALESCE(SUM(total_business_miles_tenths), 0) AS business_miles_tenths,
                     COALESCE(SUM(tolls_parking_cents), 0) AS tolls_parking_cents
                 FROM daily_logs
@@ -684,6 +734,9 @@ class FlexTrackerApp(tk.Tk):
         self.daily_log_edit_id: int | None = None
         self.other_expense_edit_id: int | None = None
         self.tax_filing_status = self.db.get_setting("filing_status", DEFAULT_FILING_STATUS)
+        self.available_states = get_available_states()
+        self.tax_state = self.db.get_setting("tax_state", "")
+        self.tax_locality = self.db.get_setting("tax_locality", "")
 
         self._build_ui()
         self.refresh_daily_logs()
@@ -1318,9 +1371,13 @@ class FlexTrackerApp(tk.Tk):
         assumptions = ttk.Frame(self.tax_content)
         assumptions.pack(fill="x", pady=(0, 6))
         self.tax_year_label_var = tk.StringVar(value=f"Tax Year: {TAX_YEAR}")
+        self.tax_state_label_var = tk.StringVar(value=f"State: {self.available_states.get(self.tax_state, 'Not selected')}")
+        self.tax_locality_label_var = tk.StringVar(value="")
         self.tax_filing_status_label_var = tk.StringVar(value=f"Filing Status: {FILING_STATUS_LABELS[self.tax_filing_status]}")
         self.tax_basis_label_var = tk.StringVar(value="Basis: If the tax year ended today")
         ttk.Label(assumptions, textvariable=self.tax_year_label_var).pack(side="left", padx=(0, 16))
+        ttk.Label(assumptions, textvariable=self.tax_state_label_var).pack(side="left", padx=(0, 16))
+        self.tax_locality_label_widget = ttk.Label(assumptions, textvariable=self.tax_locality_label_var)
         ttk.Label(assumptions, textvariable=self.tax_filing_status_label_var).pack(side="left", padx=(0, 16))
         ttk.Label(assumptions, textvariable=self.tax_basis_label_var).pack(side="left")
 
@@ -1328,59 +1385,243 @@ class FlexTrackerApp(tk.Tk):
         ttk.Label(self.tax_content, text=TAX_DISCLAIMER, wraplength=1250, justify="left").pack(anchor="w", pady=(0, 12))
 
         self.federal_tax_frame = ttk.Labelframe(self.tax_content, text="Federal Estimate (Flex Only)", padding=12)
-        self.ohio_tax_frame = ttk.Labelframe(self.tax_content, text="Ohio Estimate (State Only)", padding=12)
+        self.state_tax_frame = ttk.Labelframe(self.tax_content, text="State Estimate", padding=12)
+        self.local_tax_frame = ttk.Labelframe(self.tax_content, text="Local Tax", padding=12)
         self.combined_tax_frame = ttk.Labelframe(self.tax_content, text="Combined Estimated Tax", padding=12)
+        self.prop22_frame = ttk.Labelframe(self.tax_content, text="California Prop 22 (Informational)", padding=12)
         self.federal_tax_frame.pack(fill="x", pady=(0, 10))
-        self.ohio_tax_frame.pack(fill="x", pady=(0, 10))
-        self.combined_tax_frame.pack(fill="x")
+        self.state_tax_frame.pack(fill="x", pady=(0, 10))
+        self.local_tax_frame.pack(fill="x", pady=(0, 10))
+        self.combined_tax_frame.pack(fill="x", pady=(0, 10))
+        self.prop22_frame.pack(fill="x")
 
         self.federal_tax_labels = {}
-        self.ohio_tax_labels = {}
+        self.state_tax_labels = {}
+        self.local_tax_labels = {}
         self.combined_tax_labels = {}
+        self.prop22_labels = {}
+        self.federal_tax_name_widgets = {}
+        self.state_tax_name_labels = {}
+        self.local_tax_name_labels = {}
+        self.combined_tax_name_labels = {}
+        self.prop22_name_labels = {}
 
         self.federal_tax_keys = (
             "Gross Business Income",
             "Mileage Deduction",
             "Deductible Tolls/Parking",
             "Net Business Profit",
-            "Net Earnings for SE Tax",
+            "Net Earnings Subject to SE Tax",
             "Estimated Self-Employment Tax",
             "SE Tax Status",
             "Deductible Half of SE Tax",
             "Estimated Federal AGI",
             "Standard Deduction",
-            "Estimated Federal Taxable Income",
+            "Federal Taxable Income Before QBI",
+            "Estimated QBI Deduction",
+            "Federal Taxable Income After QBI",
             "Estimated Federal Income Tax",
             "Estimated Total Federal Tax",
         )
-        self.ohio_tax_keys = (
-            "Ohio Starting Income",
-            "Ohio Business Income Deduction",
-            "Ohio Taxable Business Income",
-            "Estimated Ohio State Tax",
-            "Ohio Status",
+        self.state_tax_keys = (
+            "state_starting_income_cents",
+            "state_business_income_deduction_cents",
+            "state_taxable_business_income_cents",
+            "estimated_state_tax_cents",
+            "state_status",
             "School District Tax",
+            "state_soft_disclaimer",
         )
         self.combined_tax_keys = (
-            "Estimated Total Federal Tax",
-            "Estimated Ohio State Tax",
-            "Combined Estimated Tax",
+            "estimated_total_federal_tax_cents",
+            "estimated_state_tax_cents",
+            "estimated_local_tax_cents",
+            "combined_estimated_tax_cents",
+        )
+        self.local_tax_keys = (
+            "local_starting_income_cents",
+            "estimated_local_tax_cents",
+            "local_status",
+            "local_soft_disclaimer",
+        )
+        self.prop22_keys = (
+            "prop22_route_hours_tenths",
+            "prop22_business_miles_tenths",
+            "prop22_minimum_pay_rate_cents_per_hour",
+            "prop22_mileage_rate_cents_per_mile",
+            "prop22_engaged_time_floor_cents",
+            "prop22_mileage_floor_cents",
+            "prop22_estimated_floor_cents",
+            "prop22_actual_pay_cents",
+            "prop22_estimated_difference_cents",
+            "prop22_estimated_payment_cents",
+            "prop22_status",
         )
 
-        for container, keys, label_map in (
-            (self.federal_tax_frame, self.federal_tax_keys, self.federal_tax_labels),
-            (self.ohio_tax_frame, self.ohio_tax_keys, self.ohio_tax_labels),
-            (self.combined_tax_frame, self.combined_tax_keys, self.combined_tax_labels),
-        ):
-            for idx, key in enumerate(keys):
-                label_map[key] = tk.StringVar(value="")
-                ttk.Label(container, text=key).grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
-                ttk.Label(container, textvariable=label_map[key]).grid(row=idx, column=1, sticky="e", pady=4)
-            container.columnconfigure(1, weight=1)
+        for idx, key in enumerate(self.federal_tax_keys):
+            self.federal_tax_labels[key] = tk.StringVar(value="")
+            if key == "Federal Taxable Income Before QBI":
+                label_row = ttk.Frame(self.federal_tax_frame)
+                label_row.grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+                ttk.Label(label_row, text="Federal Taxable Income Before").pack(side="left")
+                qbi_link = tk.Label(
+                    label_row,
+                    text=" QBI",
+                    fg="#1a5fb4",
+                    cursor="hand2",
+                    bg=self.cget("bg"),
+                )
+                qbi_link.pack(side="left")
+                qbi_link.bind("<Button-1>", lambda _event: self.show_qbi_info())
+                self.federal_tax_name_widgets[key] = label_row
+            else:
+                ttk.Label(self.federal_tax_frame, text=key).grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+            ttk.Label(self.federal_tax_frame, textvariable=self.federal_tax_labels[key]).grid(row=idx, column=1, sticky="e", pady=4)
+        self.federal_tax_frame.columnconfigure(1, weight=1)
+
+        for idx, key in enumerate(self.state_tax_keys):
+            label_text = key if key == "School District Tax" else "State"
+            self.state_tax_name_labels[key] = tk.StringVar(value=label_text)
+            self.state_tax_labels[key] = tk.StringVar(value="")
+            ttk.Label(self.state_tax_frame, textvariable=self.state_tax_name_labels[key]).grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+            ttk.Label(
+                self.state_tax_frame,
+                textvariable=self.state_tax_labels[key],
+                wraplength=900,
+                justify="right",
+            ).grid(row=idx, column=1, sticky="e", pady=4)
+        self.state_tax_frame.columnconfigure(1, weight=1)
+
+        local_default_labels = {
+            "local_starting_income_cents": "Local Taxable Income",
+            "estimated_local_tax_cents": "Estimated Local Tax",
+            "local_status": "Local Status",
+            "local_soft_disclaimer": "Local Note",
+        }
+        for idx, key in enumerate(self.local_tax_keys):
+            self.local_tax_name_labels[key] = tk.StringVar(value=local_default_labels[key])
+            self.local_tax_labels[key] = tk.StringVar(value="")
+            ttk.Label(self.local_tax_frame, textvariable=self.local_tax_name_labels[key]).grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+            ttk.Label(
+                self.local_tax_frame,
+                textvariable=self.local_tax_labels[key],
+                wraplength=900,
+                justify="right",
+            ).grid(row=idx, column=1, sticky="e", pady=4)
+        self.local_tax_frame.columnconfigure(1, weight=1)
+
+        combined_default_labels = {
+            "estimated_total_federal_tax_cents": "Estimated Total Federal Tax",
+            "estimated_state_tax_cents": "Estimated State Tax",
+            "estimated_local_tax_cents": "Estimated Local Tax",
+            "combined_estimated_tax_cents": "Combined Estimated Tax",
+        }
+        self.combined_tax_rows = {}
+        for idx, key in enumerate(self.combined_tax_keys):
+            self.combined_tax_name_labels[key] = tk.StringVar(value=combined_default_labels[key])
+            self.combined_tax_labels[key] = tk.StringVar(value="")
+            name_widget = ttk.Label(self.combined_tax_frame, textvariable=self.combined_tax_name_labels[key])
+            value_widget = ttk.Label(self.combined_tax_frame, textvariable=self.combined_tax_labels[key])
+            name_widget.grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+            value_widget.grid(row=idx, column=1, sticky="e", pady=4)
+            self.combined_tax_rows[key] = (name_widget, value_widget)
+        self.combined_tax_frame.columnconfigure(1, weight=1)
+
+        prop22_default_labels = {
+            "prop22_route_hours_tenths": "Route Hours Proxy",
+            "prop22_business_miles_tenths": "Business Miles Proxy",
+            "prop22_minimum_pay_rate_cents_per_hour": "Engaged-Time Floor Rate",
+            "prop22_mileage_rate_cents_per_mile": "Per-Mile Rate",
+            "prop22_engaged_time_floor_cents": "Estimated Engaged-Time Floor",
+            "prop22_mileage_floor_cents": "Estimated Mileage Floor",
+            "prop22_estimated_floor_cents": "Estimated Prop 22 Floor",
+            "prop22_actual_pay_cents": "Actual Logged Block Pay",
+            "prop22_estimated_difference_cents": "Difference vs Prop 22 Floor",
+            "prop22_estimated_payment_cents": "Prop 22 Estimated Payment",
+            "prop22_status": "Prop 22 Disclaimer",
+        }
+        for idx, key in enumerate(self.prop22_keys):
+            self.prop22_name_labels[key] = tk.StringVar(value=prop22_default_labels[key])
+            self.prop22_labels[key] = tk.StringVar(value="")
+            ttk.Label(self.prop22_frame, textvariable=self.prop22_name_labels[key]).grid(row=idx, column=0, sticky="w", pady=4, padx=(0, 12))
+            if key == "prop22_status":
+                tk.Label(
+                    self.prop22_frame,
+                    textvariable=self.prop22_labels[key],
+                    fg="#b22222",
+                    wraplength=900,
+                    justify="right",
+                    anchor="e",
+                    bg=self.cget("bg"),
+                ).grid(row=idx, column=1, sticky="e", pady=4)
+            else:
+                ttk.Label(self.prop22_frame, textvariable=self.prop22_labels[key], wraplength=900, justify="right").grid(row=idx, column=1, sticky="e", pady=4)
+        self.prop22_frame.columnconfigure(1, weight=1)
+        ttk.Button(self.prop22_frame, text="More Information", command=self.show_prop22_info).grid(
+            row=len(self.prop22_keys),
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+        self.local_tax_frame.pack_forget()
+        self.prop22_frame.pack_forget()
 
     def set_tax_current_month(self) -> None:
         self.tax_month_var.set(date.today().strftime("%Y-%m"))
         self.refresh_tax_estimate()
+
+    def show_prop22_info(self) -> None:
+        info_text = (
+            "California Prop 22 is a driver-compensation rule for app-based drivers, separate from tax deductions.\n\n"
+            "What this panel means:\n"
+            "Engaged-Time Floor Rate: 120% of the applicable minimum wage for engaged time. This app currently uses the "
+            "2026 California statewide minimum wage only.\n"
+            "Per-Mile Rate: the official 2026 California Prop 22 per-mile vehicle-expense amount.\n"
+            "Estimated Engaged-Time Floor: route hours proxy x engaged-time floor rate.\n"
+            "Estimated Mileage Floor: business miles proxy x per-mile rate.\n"
+            "Estimated Prop 22 Floor: engaged-time floor + mileage floor.\n"
+            "Difference vs Prop 22 Floor: actual logged block pay - estimated Prop 22 floor.\n"
+            "Prop 22 Estimated Payment: the amount of the estimated gap when the difference is negative; otherwise $0.00.\n\n"
+            "Definitions used by California law:\n"
+            "Engaged time: time from accepting a ride or delivery request until completing it, as recorded by the platform.\n"
+            "Engaged miles: miles driven during engaged time.\n\n"
+            "Important limitation:\n"
+            "This app uses route hours and business miles as simple proxies. Amazon or another platform may calculate a "
+            "different result because they use platform-recorded engaged time, engaged miles, pay-period true-ups, and may "
+            "apply a higher local minimum wage in some cities.\n\n"
+            "Sources:\n"
+            "California Business and Professions Code sections 7453 and 7463\n"
+            "California Treasurer: 2026 Prop 22 per-mile rate = $0.37\n"
+            "California Department of Industrial Relations: 2026 statewide minimum wage = $16.90"
+        )
+        messagebox.showinfo("California Prop 22 Information", info_text)
+
+    def show_qbi_info(self) -> None:
+        info_text = (
+            "Qualified Business Income (QBI) is a federal deduction under Internal Revenue Code section 199A.\n\n"
+            "In plain English:\n"
+            "Eligible taxpayers may deduct up to 20% of qualified business income from a pass-through business, "
+            "including sole proprietorship income such as Amazon Flex Schedule C income.\n\n"
+            "How this app estimates it:\n"
+            "1. QBI base = net business profit - deductible half of self-employment tax.\n"
+            "2. Estimated QBI deduction = 20% of that QBI base.\n"
+            "3. The deduction is capped at 20% of taxable income before the QBI deduction.\n"
+            "4. Federal income tax is then calculated on taxable income after the estimated QBI deduction.\n\n"
+            "IRS definitions and guidance:\n"
+            "Qualified business income generally includes qualified items of income, gain, deduction, and loss from a "
+            "qualified trade or business, including sole proprietorships.\n"
+            "QBI does not include wage income, capital gains, most investment income, REIT dividends, or PTP income.\n"
+            "Higher-income or special-case taxpayers may need the more complex Form 8995-A instead of Form 8995.\n\n"
+            "Disclaimer:\n"
+            "QBI is estimated under the app's assumptions that Amazon Flex is the user's only qualified business income "
+            "and that no high-income or special-case limitations apply.\n\n"
+            "Sources:\n"
+            "IRS Form 8995: Qualified Business Income Deduction Simplified Computation\n"
+            "IRS Instructions for Form 8995\n"
+            "IRS Qualified business income deduction overview"
+        )
+        messagebox.showinfo("Qualified Business Income Information", info_text)
 
     def open_tax_settings(self) -> None:
         window = tk.Toplevel(self)
@@ -1398,7 +1639,40 @@ class FlexTrackerApp(tk.Tk):
         year_entry.state(["readonly"])
         year_entry.grid(row=0, column=1, sticky="ew", pady=4)
 
-        ttk.Label(frame, text="Filing Status:").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 10))
+        ttk.Label(frame, text="State:").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 10))
+        state_var = tk.StringVar(value=self.available_states.get(self.tax_state, ""))
+        state_combo = ttk.Combobox(
+            frame,
+            textvariable=state_var,
+            values=tuple(self.available_states.values()),
+            state="readonly",
+            width=28,
+        )
+        state_combo.grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(frame, text="New York Local Tax:").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 10))
+        locality_options = {"": "None", "nyc_resident": "NYC resident", "yonkers_resident": "Yonkers resident"}
+        locality_var = tk.StringVar(value=locality_options.get(self.tax_locality, "None"))
+        locality_combo = ttk.Combobox(
+            frame,
+            textvariable=locality_var,
+            values=tuple(locality_options.values()),
+            state="readonly",
+            width=28,
+        )
+        locality_combo.grid(row=2, column=1, sticky="ew", pady=4)
+
+        def sync_locality_state(*_args: object) -> None:
+            if state_var.get() == "New York":
+                locality_combo.configure(state="readonly")
+            else:
+                locality_var.set("None")
+                locality_combo.configure(state="disabled")
+
+        sync_locality_state()
+        state_var.trace_add("write", sync_locality_state)
+
+        ttk.Label(frame, text="Filing Status:").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 10))
         filing_status_var = tk.StringVar(value=FILING_STATUS_LABELS[self.tax_filing_status])
         filing_status_combo = ttk.Combobox(
             frame,
@@ -1407,10 +1681,10 @@ class FlexTrackerApp(tk.Tk):
             state="readonly",
             width=28,
         )
-        filing_status_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        filing_status_combo.grid(row=3, column=1, sticky="ew", pady=4)
 
         assumptions_box = ttk.Labelframe(frame, text="Assumptions", padding=10)
-        assumptions_box.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 8))
+        assumptions_box.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 8))
         assumptions_text = (
             "Estimate Basis: If the tax year ended today\n"
             "Income Source: Amazon Flex only\n"
@@ -1424,17 +1698,39 @@ class FlexTrackerApp(tk.Tk):
         ttk.Label(assumptions_box, text=assumptions_text, justify="left").pack(anchor="w")
 
         disclaimer_box = ttk.Labelframe(frame, text="Disclaimer", padding=10)
-        disclaimer_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        disclaimer_box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Label(disclaimer_box, text=TAX_DISCLAIMER, wraplength=520, justify="left").pack(anchor="w")
 
         btn_row = ttk.Frame(frame)
-        btn_row.grid(row=4, column=0, columnspan=2, sticky="e")
+        btn_row.grid(row=6, column=0, columnspan=2, sticky="e")
 
         def save_settings() -> None:
+            reverse_state_map = {label: key for key, label in self.available_states.items()}
+            selected_state_key = reverse_state_map.get(state_var.get(), "")
+            if not selected_state_key:
+                messagebox.showerror("Missing State", "Select a state before saving tax settings.")
+                return
             reverse_map = {label: key for key, label in FILING_STATUS_LABELS.items()}
             selected_key = reverse_map[filing_status_var.get()]
+            reverse_locality_map = {label: key for key, label in locality_options.items()}
+            selected_locality_key = (
+                reverse_locality_map.get(locality_var.get(), "")
+                if selected_state_key == "new_york"
+                else ""
+            )
+            self.tax_state = selected_state_key
+            self.tax_locality = selected_locality_key
             self.tax_filing_status = selected_key
+            self.db.set_setting("tax_state", selected_state_key)
+            self.db.set_setting("tax_locality", selected_locality_key)
             self.db.set_setting("filing_status", selected_key)
+            self.tax_state_label_var.set(f"State: {self.available_states[selected_state_key]}")
+            if selected_locality_key:
+                self.tax_locality_label_var.set(f"Local: {locality_options[selected_locality_key]}")
+                self.tax_locality_label_widget.pack(side="left", padx=(0, 16))
+            else:
+                self.tax_locality_label_var.set("")
+                self.tax_locality_label_widget.pack_forget()
             self.tax_filing_status_label_var.set(f"Filing Status: {FILING_STATUS_LABELS[selected_key]}")
             self.refresh_tax_estimate()
             self.status_var.set("Saved tax settings.")
@@ -1446,6 +1742,27 @@ class FlexTrackerApp(tk.Tk):
         frame.columnconfigure(1, weight=1)
 
     def refresh_tax_estimate(self) -> None:
+        if not self.tax_state:
+            self.state_tax_frame.configure(text="State Estimate")
+            for label_var in self.federal_tax_labels.values():
+                label_var.set("")
+            for label_var in self.state_tax_labels.values():
+                label_var.set("")
+            for label_var in self.local_tax_labels.values():
+                label_var.set("")
+            for label_var in self.combined_tax_labels.values():
+                label_var.set("")
+            for label_var in self.prop22_labels.values():
+                label_var.set("")
+            self.tax_locality_label_var.set("")
+            self.tax_locality_label_widget.pack_forget()
+            self.local_tax_frame.pack_forget()
+            self.combined_tax_rows["estimated_local_tax_cents"][0].grid_remove()
+            self.combined_tax_rows["estimated_local_tax_cents"][1].grid_remove()
+            self.prop22_frame.pack_forget()
+            self.status_var.set("Select a state in Tax Settings to calculate tax estimates.")
+            return
+
         month_filter = self.tax_month_var.get().strip() or date.today().strftime("%Y-%m")
         try:
             tax_basis = self.db.get_tax_basis(month_filter)
@@ -1453,48 +1770,155 @@ class FlexTrackerApp(tk.Tk):
             messagebox.showerror("Invalid Month", "Tax month must be YYYY-MM.")
             return
 
-        results = calculate_tax_estimate(tax_basis, self.tax_filing_status)
+        results = calculate_tax_estimate(
+            tax_basis,
+            self.tax_filing_status,
+            self.tax_state,
+            self.tax_locality,
+        )
+        state_config = get_state_config(self.tax_state)
+        state_name = self.available_states[self.tax_state]
+        if self.tax_locality and self.tax_state == "new_york":
+            locality_text = {
+                "nyc_resident": "NYC resident",
+                "yonkers_resident": "Yonkers resident",
+            }.get(self.tax_locality, self.tax_locality)
+            self.tax_locality_label_var.set(f"Local: {locality_text}")
+            self.tax_locality_label_widget.pack(side="left", padx=(0, 16))
+        else:
+            self.tax_locality_label_var.set("")
+            self.tax_locality_label_widget.pack_forget()
+        self.state_tax_frame.configure(text=state_config["frame_title"])
+        self.state_tax_name_labels["state_starting_income_cents"].set(state_config["field_labels"]["state_starting_income_cents"])
+        self.state_tax_name_labels["state_business_income_deduction_cents"].set(state_config["field_labels"]["state_business_income_deduction_cents"])
+        self.state_tax_name_labels["state_taxable_business_income_cents"].set(state_config["field_labels"]["state_taxable_business_income_cents"])
+        self.state_tax_name_labels["estimated_state_tax_cents"].set(state_config["field_labels"]["estimated_state_tax_cents"])
+        self.state_tax_name_labels["state_status"].set(state_config["field_labels"]["state_status"])
+        self.state_tax_name_labels["School District Tax"].set(state_config["field_labels"]["school_district_tax_status"])
+        self.state_tax_name_labels["state_soft_disclaimer"].set(
+            state_config["field_labels"].get("state_soft_disclaimer", "")
+        )
+        self.combined_tax_name_labels["estimated_state_tax_cents"].set(state_config["estimate_label"])
 
         federal_mapping = {
             "Gross Business Income": results["gross_business_income_cents"],
             "Mileage Deduction": results["mileage_deduction_cents"],
             "Deductible Tolls/Parking": results["deductible_tolls_parking_cents"],
             "Net Business Profit": results["net_business_profit_cents"],
-            "Net Earnings for SE Tax": results["net_earnings_for_se_tax_cents"],
+            "Net Earnings Subject to SE Tax": results["net_earnings_for_se_tax_cents"],
             "Estimated Self-Employment Tax": results["estimated_self_employment_tax_cents"],
             "SE Tax Status": results["se_tax_status"],
             "Deductible Half of SE Tax": results["deductible_half_se_tax_cents"],
             "Estimated Federal AGI": results["estimated_federal_agi_cents"],
             "Standard Deduction": results["standard_deduction_cents"],
-            "Estimated Federal Taxable Income": results["estimated_federal_taxable_income_cents"],
+            "Federal Taxable Income Before QBI": results["estimated_federal_taxable_income_before_qbi_cents"],
+            "Estimated QBI Deduction": results["estimated_qbi_deduction_cents"],
+            "Federal Taxable Income After QBI": results["estimated_federal_taxable_income_cents"],
             "Estimated Federal Income Tax": results["estimated_federal_income_tax_cents"],
             "Estimated Total Federal Tax": results["estimated_total_federal_tax_cents"],
         }
-        ohio_mapping = {
-            "Ohio Starting Income": results["ohio_starting_income_cents"],
-            "Ohio Business Income Deduction": results["ohio_business_income_deduction_cents"],
-            "Ohio Taxable Business Income": results["ohio_taxable_business_income_cents"],
-            "Estimated Ohio State Tax": results["estimated_ohio_state_tax_cents"],
-            "Ohio Status": results["ohio_status"],
+        state_mapping = {
+            "state_starting_income_cents": results["state_starting_income_cents"],
+            "state_business_income_deduction_cents": results["state_business_income_deduction_cents"],
+            "state_taxable_business_income_cents": results["state_taxable_business_income_cents"],
+            "estimated_state_tax_cents": results["estimated_state_tax_cents"],
+            "state_status": results["state_status"],
             "School District Tax": results["school_district_tax_status"],
+            "state_soft_disclaimer": results.get("state_soft_disclaimer", ""),
         }
         combined_mapping = {
-            "Estimated Total Federal Tax": results["estimated_total_federal_tax_cents"],
-            "Estimated Ohio State Tax": results["estimated_ohio_state_tax_cents"],
-            "Combined Estimated Tax": results["combined_estimated_tax_cents"],
+            "estimated_total_federal_tax_cents": results["estimated_total_federal_tax_cents"],
+            "estimated_state_tax_cents": results["estimated_state_tax_cents"],
+            "estimated_local_tax_cents": results.get("estimated_local_tax_cents", 0),
+            "combined_estimated_tax_cents": results["combined_estimated_tax_cents"],
         }
 
         for key in self.federal_tax_keys:
             value = federal_mapping[key]
             self.federal_tax_labels[key].set(cents_to_currency(value) if isinstance(value, int) else str(value))
-        for key in self.ohio_tax_keys:
-            value = ohio_mapping[key]
-            self.ohio_tax_labels[key].set(cents_to_currency(value) if isinstance(value, int) else str(value))
+        for key in self.state_tax_keys:
+            value = state_mapping[key]
+            self.state_tax_labels[key].set(cents_to_currency(value) if isinstance(value, int) else str(value))
         for key in self.combined_tax_keys:
             value = combined_mapping[key]
             self.combined_tax_labels[key].set(cents_to_currency(value) if isinstance(value, int) else str(value))
 
-        self.status_var.set(f"Refreshed tax estimate for {month_filter}.")
+        if "estimated_local_tax_cents" in results and results.get("local_frame_title"):
+            self.local_tax_frame.configure(text=results["local_frame_title"])
+            local_field_labels = results.get("local_field_labels", {})
+            self.local_tax_name_labels["local_starting_income_cents"].set(
+                local_field_labels.get("local_starting_income_cents", "Local Taxable Income")
+            )
+            self.local_tax_name_labels["estimated_local_tax_cents"].set(
+                local_field_labels.get("estimated_local_tax_cents", "Estimated Local Tax")
+            )
+            self.local_tax_name_labels["local_status"].set(
+                local_field_labels.get("local_status", "Local Status")
+            )
+            self.local_tax_name_labels["local_soft_disclaimer"].set(
+                local_field_labels.get("local_soft_disclaimer", "Local Note")
+            )
+            local_mapping = {
+                "local_starting_income_cents": results["local_starting_income_cents"],
+                "estimated_local_tax_cents": results["estimated_local_tax_cents"],
+                "local_status": results["local_status"],
+                "local_soft_disclaimer": results.get("local_soft_disclaimer", ""),
+            }
+            for key in self.local_tax_keys:
+                value = local_mapping[key]
+                self.local_tax_labels[key].set(cents_to_currency(value) if isinstance(value, int) else str(value))
+            self.combined_tax_name_labels["estimated_local_tax_cents"].set(
+                results.get("local_estimate_label", "Estimated Local Tax")
+            )
+            self.combined_tax_rows["estimated_local_tax_cents"][0].grid()
+            self.combined_tax_rows["estimated_local_tax_cents"][1].grid()
+            self.local_tax_frame.pack(fill="x", pady=(0, 10), before=self.combined_tax_frame)
+        else:
+            for label_var in self.local_tax_labels.values():
+                label_var.set("")
+            self.combined_tax_name_labels["estimated_local_tax_cents"].set("Estimated Local Tax")
+            self.combined_tax_rows["estimated_local_tax_cents"][0].grid_remove()
+            self.combined_tax_rows["estimated_local_tax_cents"][1].grid_remove()
+            self.local_tax_frame.pack_forget()
+
+        if "prop22_status" in results:
+            prop22_mapping = {
+                "prop22_route_hours_tenths": results["prop22_route_hours_tenths"],
+                "prop22_business_miles_tenths": results["prop22_business_miles_tenths"],
+                "prop22_minimum_pay_rate_cents_per_hour": results["prop22_minimum_pay_rate_cents_per_hour"],
+                "prop22_mileage_rate_cents_per_mile": results["prop22_mileage_rate_cents_per_mile"],
+                "prop22_engaged_time_floor_cents": results["prop22_engaged_time_floor_cents"],
+                "prop22_mileage_floor_cents": results["prop22_mileage_floor_cents"],
+                "prop22_estimated_floor_cents": results["prop22_estimated_floor_cents"],
+                "prop22_actual_pay_cents": results["prop22_actual_pay_cents"],
+                "prop22_estimated_difference_cents": results["prop22_estimated_difference_cents"],
+                "prop22_estimated_payment_cents": results["prop22_estimated_payment_cents"],
+                "prop22_status": results["prop22_status"],
+            }
+            for key in self.prop22_keys:
+                value = prop22_mapping[key]
+                if key.endswith("_tenths"):
+                    self.prop22_labels[key].set(tenths_to_str(value))
+                elif isinstance(value, int):
+                    self.prop22_labels[key].set(cents_to_currency(value))
+                else:
+                    self.prop22_labels[key].set(str(value))
+            self.prop22_frame.pack(fill="x")
+        else:
+            for label_var in self.prop22_labels.values():
+                label_var.set("")
+            self.prop22_frame.pack_forget()
+
+        if self.tax_locality and self.tax_state == "new_york":
+            locality_status_text = {
+                "nyc_resident": "NYC resident",
+                "yonkers_resident": "Yonkers resident",
+            }.get(self.tax_locality, self.tax_locality)
+            self.status_var.set(
+                f"Refreshed tax estimate for {month_filter} using {state_name} with {locality_status_text} local tax."
+            )
+        else:
+            self.status_var.set(f"Refreshed tax estimate for {month_filter} using {state_name}.")
 
     # ---------------- Export and Backup ----------------
     def _build_export_tab(self) -> None:
@@ -1682,6 +2106,10 @@ class FlexTrackerApp(tk.Tk):
 
 
     def export_tax_estimate_csv(self) -> None:
+        if not self.tax_state:
+            messagebox.showerror("Missing State", "Select a state in Tax Settings before exporting a tax estimate.")
+            return
+
         month_filter = self.export_tax_month_var.get().strip() or date.today().strftime("%Y-%m")
         try:
             tax_basis = self.db.get_tax_basis(month_filter)
@@ -1689,7 +2117,14 @@ class FlexTrackerApp(tk.Tk):
             messagebox.showerror("Invalid Month", "Tax export month must be YYYY-MM.")
             return
 
-        results = calculate_tax_estimate(tax_basis, self.tax_filing_status)
+        results = calculate_tax_estimate(
+            tax_basis,
+            self.tax_filing_status,
+            self.tax_state,
+            self.tax_locality,
+        )
+        state_config = get_state_config(self.tax_state)
+        state_name = self.available_states[self.tax_state]
         path = filedialog.asksaveasfilename(
             title="Save Tax Estimate CSV",
             defaultextension=".csv",
@@ -1702,6 +2137,15 @@ class FlexTrackerApp(tk.Tk):
 
         rows = [
             ("meta", "Tax Year", str(TAX_YEAR)),
+            ("meta", "State", state_name),
+            (
+                "meta",
+                "Local Tax Selection",
+                {
+                    "nyc_resident": "NYC resident",
+                    "yonkers_resident": "Yonkers resident",
+                }.get(self.tax_locality, "None"),
+            ),
             ("meta", "Filing Status", FILING_STATUS_LABELS[self.tax_filing_status]),
             ("meta", "Basis", "If the tax year ended today"),
             ("meta", "Scope", TAX_SCOPE_NOTE),
@@ -1716,19 +2160,82 @@ class FlexTrackerApp(tk.Tk):
             ("federal", "Deductible Half of SE Tax", cents_to_str(results["deductible_half_se_tax_cents"])),
             ("federal", "Estimated Federal AGI", cents_to_str(results["estimated_federal_agi_cents"])),
             ("federal", "Standard Deduction", cents_to_str(results["standard_deduction_cents"])),
-            ("federal", "Estimated Federal Taxable Income", cents_to_str(results["estimated_federal_taxable_income_cents"])),
+            ("federal", "Federal Taxable Income Before QBI", cents_to_str(results["estimated_federal_taxable_income_before_qbi_cents"])),
+            ("federal", "Estimated QBI Deduction", cents_to_str(results["estimated_qbi_deduction_cents"])),
+            ("federal", "Federal Taxable Income After QBI", cents_to_str(results["estimated_federal_taxable_income_cents"])),
             ("federal", "Estimated Federal Income Tax", cents_to_str(results["estimated_federal_income_tax_cents"])),
             ("federal", "Estimated Total Federal Tax", cents_to_str(results["estimated_total_federal_tax_cents"])),
-            ("ohio", "Ohio Starting Income", cents_to_str(results["ohio_starting_income_cents"])),
-            ("ohio", "Ohio Business Income Deduction", cents_to_str(results["ohio_business_income_deduction_cents"])),
-            ("ohio", "Ohio Taxable Business Income", cents_to_str(results["ohio_taxable_business_income_cents"])),
-            ("ohio", "Estimated Ohio State Tax", cents_to_str(results["estimated_ohio_state_tax_cents"])),
-            ("ohio", "Ohio Status", results["ohio_status"]),
-            ("ohio", "School District Tax", results["school_district_tax_status"]),
+            ("state", state_config["field_labels"]["state_starting_income_cents"], cents_to_str(results["state_starting_income_cents"])),
+            ("state", state_config["field_labels"]["state_business_income_deduction_cents"], cents_to_str(results["state_business_income_deduction_cents"])),
+            ("state", state_config["field_labels"]["state_taxable_business_income_cents"], cents_to_str(results["state_taxable_business_income_cents"])),
+            ("state", state_config["field_labels"]["estimated_state_tax_cents"], cents_to_str(results["estimated_state_tax_cents"])),
+            ("state", state_config["field_labels"]["state_status"], results["state_status"]),
+            ("state", state_config["field_labels"]["school_district_tax_status"], results["school_district_tax_status"]),
             ("combined", "Estimated Total Federal Tax", cents_to_str(results["estimated_total_federal_tax_cents"])),
-            ("combined", "Estimated Ohio State Tax", cents_to_str(results["estimated_ohio_state_tax_cents"])),
+            ("combined", state_config["estimate_label"], cents_to_str(results["estimated_state_tax_cents"])),
             ("combined", "Combined Estimated Tax", cents_to_str(results["combined_estimated_tax_cents"])),
         ]
+        if results.get("state_soft_disclaimer"):
+            rows.append(
+                (
+                    "state",
+                    state_config["field_labels"].get("state_soft_disclaimer", "State Disclaimer"),
+                    results["state_soft_disclaimer"],
+                )
+            )
+        if "estimated_local_tax_cents" in results and results.get("local_frame_title"):
+            rows.insert(
+                len(rows) - 1,
+                (
+                    "combined",
+                    results.get("local_estimate_label", "Estimated Local Tax"),
+                    cents_to_str(results["estimated_local_tax_cents"]),
+                ),
+            )
+            local_field_labels = results.get("local_field_labels", {})
+            rows.extend(
+                [
+                    (
+                        "local",
+                        local_field_labels.get("local_starting_income_cents", "Local Taxable Income"),
+                        cents_to_str(results["local_starting_income_cents"]),
+                    ),
+                    (
+                        "local",
+                        local_field_labels.get("estimated_local_tax_cents", "Estimated Local Tax"),
+                        cents_to_str(results["estimated_local_tax_cents"]),
+                    ),
+                    (
+                        "local",
+                        local_field_labels.get("local_status", "Local Status"),
+                        results["local_status"],
+                    ),
+                ]
+            )
+            if results.get("local_soft_disclaimer"):
+                rows.append(
+                    (
+                        "local",
+                        local_field_labels.get("local_soft_disclaimer", "Local Note"),
+                        results["local_soft_disclaimer"],
+                    )
+                )
+        if "prop22_status" in results:
+            rows.extend(
+                [
+                    ("prop22", "Route Hours Proxy", tenths_to_str(results["prop22_route_hours_tenths"])),
+                    ("prop22", "Business Miles Proxy", tenths_to_str(results["prop22_business_miles_tenths"])),
+                    ("prop22", "Engaged-Time Floor Rate", cents_to_str(results["prop22_minimum_pay_rate_cents_per_hour"])),
+                    ("prop22", "Per-Mile Rate", cents_to_str(results["prop22_mileage_rate_cents_per_mile"])),
+                    ("prop22", "Estimated Engaged-Time Floor", cents_to_str(results["prop22_engaged_time_floor_cents"])),
+                    ("prop22", "Estimated Mileage Floor", cents_to_str(results["prop22_mileage_floor_cents"])),
+                    ("prop22", "Estimated Prop 22 Floor", cents_to_str(results["prop22_estimated_floor_cents"])),
+                    ("prop22", "Actual Logged Block Pay", cents_to_str(results["prop22_actual_pay_cents"])),
+                    ("prop22", "Difference vs Prop 22 Floor", cents_to_str(results["prop22_estimated_difference_cents"])),
+                    ("prop22", "Prop 22 Estimated Payment", cents_to_str(results["prop22_estimated_payment_cents"])),
+                    ("prop22", "Prop 22 Disclaimer", results["prop22_status"]),
+                ]
+            )
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
