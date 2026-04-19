@@ -1,6 +1,6 @@
 # flex-track
 
-A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python, Tkinter, and SQLite. The current downloadable build is the v0.1.1 portable ZIP.
+A local desktop Amazon Flex bookkeeping and tax-estimate tool built with Python, Tkinter, and SQLite. The current downloadable build is the v0.1.2 portable ZIP.
 
 ## Current features
 - Daily log entry
@@ -45,7 +45,7 @@ State notes:
 - State calculations are simplified resident estimates and do not attempt to cover every edge case
 
 ## Download & Installation
-1. Direct link to the latest release: https://github.com/goblindespiser/flex-track/releases/tag/v0.1.1
+1. Direct link to the latest release: https://github.com/goblindespiser/flex-track/releases/tag/v0.1.2
 2. Click "FlexTrack.zip" to begin download to desired destination folder
 3. Extract zip
 4. Open extracted folder
