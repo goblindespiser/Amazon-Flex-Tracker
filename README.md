@@ -37,7 +37,7 @@ Current tax assumptions:
 
 Federal notes:
 - The federal estimate includes self-employment tax and a simplified QBI estimate under the app's assumptions.
-- Additional Medicare Tax is not currently modeled.
+- Additional Medicare Tax is not currently modeled as it's highly unlikely a taxpayer under the app's assumptions goes above the threshold to trigger it.
 
 State notes:
 - Supported states: Ohio, California, Texas, Florida, Illinois, Virginia, Pennsylvania, North Carolina, and New York
