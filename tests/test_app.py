@@ -112,11 +112,12 @@ class TestTaxMath(unittest.TestCase):
         results = calculate_ohio_tax({"net_business_profit_cents": 0}, "single")
 
         self.assertEqual(results["estimated_state_tax_cents"], 0)
-        self.assertEqual(results["state_status"], "Below Ohio estimated quarterly payment threshold")
+        self.assertEqual(results["state_status"], "Below Ohio estimated quarterly payment threshold by $500.00")
 
     def test_available_states_includes_ohio_and_california(self) -> None:
         available_states = get_available_states()
 
+        self.assertEqual(list(available_states.values()), sorted(available_states.values()))
         self.assertEqual(available_states["ohio"], "Ohio")
         self.assertEqual(available_states["california"], "California")
         self.assertEqual(available_states["texas"], "Texas")
@@ -143,6 +144,7 @@ class TestTaxMath(unittest.TestCase):
         self.assertEqual(results["state_business_income_deduction_cents"], 0)
         self.assertGreaterEqual(results["estimated_state_tax_cents"], 0)
         self.assertIn("estimated quarterly payment threshold", results["state_status"])
+        self.assertIn("simplified resident estimate", results["state_status"])
 
     def test_california_prop22_info_uses_logged_hours_miles_and_pay(self) -> None:
         results = _calculate_california_prop22_info(
